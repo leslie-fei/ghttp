@@ -2,8 +2,10 @@ package gnet
 
 import (
 	"context"
+	"errors"
 	"time"
 
+	"github.com/leslie-fei/webapp/pkg/errs"
 	"github.com/leslie-fei/webapp/pkg/network"
 	"github.com/panjf2000/gnet/v2"
 	"github.com/panjf2000/gnet/v2/pkg/logging"
@@ -28,7 +30,7 @@ func (t *transporter) Close() error {
 	if t.handler == nil {
 		return nil
 	}
-	return t.handler.Close(context.Background())
+	return t.handler.Stop(context.Background())
 }
 
 func (t *transporter) ListenAndServe(onData network.OnData) error {
@@ -45,7 +47,7 @@ type handler struct {
 	engine gnet.Engine
 }
 
-func (h *handler) Close(ctx context.Context) error {
+func (h *handler) Stop(ctx context.Context) error {
 	return h.engine.Stop(ctx)
 }
 
@@ -54,10 +56,28 @@ func (h *handler) OnBoot(eng gnet.Engine) (action gnet.Action) {
 	return
 }
 
+func (h *handler) OnOpen(c gnet.Conn) (out []byte, action gnet.Action) {
+	return
+}
+
+func (h *handler) OnClose(c gnet.Conn, _ error) (action gnet.Action) {
+	if c.Context() != nil {
+		if r, ok := c.Context().(interface{ Release() }); ok {
+			r.Release()
+		}
+	}
+	return
+}
+
 func (h *handler) OnTraffic(c gnet.Conn) (action gnet.Action) {
-	if err := h.onData(context.Background(), &conn{c}); err != nil {
-		logging.Errorf("OnData error: %v", err)
-		return gnet.Close
+	for c.InboundBuffered() > 0 {
+		if err := h.onData(context.Background(), &conn{c}); err != nil {
+			if errors.Is(err, errs.ErrNeedMore) {
+				return gnet.None
+			}
+			logging.Errorf("OnData error: %v", err)
+			return gnet.Close
+		}
 	}
 	return gnet.None
 }

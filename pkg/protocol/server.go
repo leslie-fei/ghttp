@@ -362,6 +362,7 @@ type RequestConfig struct {
 // running goroutines. The only exception is TimeoutError*, which may be called
 // while other goroutines accessing RequestCtx.
 type RequestCtx struct {
+	server *Server
 	noCopy noCopy
 
 	// Incoming request.
@@ -396,6 +397,52 @@ type RequestCtx struct {
 	hijackHandler    HijackHandler
 	hijackNoResponse bool
 	formValueFunc    FormValueFunc
+	chain            *chain
+	br               *bufio.Reader
+	bw               *bufio.Writer
+}
+
+type chain struct {
+	tasks  []func() error
+	err    error
+	compFn func(err error) error
+}
+
+func (c *chain) then(fn func() error) *chain {
+	c.tasks = append(c.tasks, fn)
+	return c
+}
+
+func (c *chain) exec() error {
+	if c.err != nil {
+		return c.err
+	}
+	if len(c.tasks) == 0 {
+		return errors.New("async task length = 0")
+	}
+	err := c.tasks[0]()
+	if err != nil && !errors.Is(err, errNeedMore) {
+		c.err = err
+	}
+	if err == nil {
+		c.tasks = c.tasks[1:]
+	}
+	// has error or async task length = 0
+	if c.err != nil || len(c.tasks) == 0 {
+		compErr := c.compFn(c.err)
+		if compErr != nil {
+			c.err = compErr
+		}
+	}
+	return err
+}
+
+func (c *chain) onComplete(fn func(err error) error) {
+	c.compFn = fn
+}
+
+func (ctx *RequestCtx) Release() {
+	ctx.server.Release(ctx)
 }
 
 // HijackHandler must process the hijacked connection c.
@@ -544,6 +591,10 @@ func (ctx *RequestCtx) Conn() net.Conn {
 }
 
 func (ctx *RequestCtx) reset() {
+	ctx.server = nil
+	ctx.br = nil
+	ctx.bw = nil
+	ctx.chain = nil
 	ctx.userValues.Reset()
 	ctx.Request.Reset()
 	ctx.Response.Reset()
@@ -1546,264 +1597,77 @@ func (s *Server) serveConnCleanup() {
 	atomic.AddInt32(&s.open, -1)
 }
 
-func (s *Server) Serve(c context.Context, conn network.Conn) (err error) {
-	//defer s.serveConnCleanup()
+func (s *Server) Release(ctx *RequestCtx) {
+	releaseReader(s, ctx.br)
+	releaseWriter(s, ctx.bw)
+	s.releaseCtx(ctx)
+}
 
-	//var proto string
-	//if proto, err = s.getNextProto(c); err != nil {
-	//	return
-	//}
-	//if handler, ok := s.nextProtos[proto]; ok {
-	//	// Remove read or write deadlines that might have previously been set.
-	//	// The next handler is responsible for setting its own deadlines.
-	//	if s.ReadTimeout > 0 || s.WriteTimeout > 0 {
-	//		if err := c.SetDeadline(zeroTime); err != nil {
-	//			panic(fmt.Sprintf("BUG: error in SetDeadline(zeroTime): %v", err))
-	//		}
-	//	}
-	//
-	//	return handler(c)
-	//}
-
-	serverName := s.getServerName()
-	connRequestNum := uint64(0)
-	connID := nextConnID()
-	connTime := time.Now()
-	maxRequestBodySize := s.MaxRequestBodySize
-	if maxRequestBodySize <= 0 {
-		maxRequestBodySize = DefaultMaxRequestBodySize
+func (s *Server) GetRequestCtx(conn network.Conn) *RequestCtx {
+	if conn.Context() != nil {
+		return conn.Context().(*RequestCtx)
 	}
-	writeTimeout := s.WriteTimeout
-	previousWriteTimeout := time.Duration(0)
-
 	ctx := s.acquireCtx(conn)
-	ctx.connTime = connTime
-	var (
-		br *bufio.Reader
-		bw *bufio.Writer
+	ctx.server = s
+	ctx.connTime = time.Now()
+	ctx.connID = nextConnID()
+	ctx.br = acquireReader(ctx)
+	ctx.bw = acquireWriter(ctx)
+	ctx.chain = &chain{}
+	ctx.Response.Header.noDefaultContentType = s.NoDefaultContentType
+	ctx.Response.Header.noDefaultDate = s.NoDefaultDate
 
-		timeoutResponse  *Response
-		hijackHandler    HijackHandler
-		hijackNoResponse bool
+	// Secure header error logs configuration
+	ctx.Request.Header.secureErrorLogMessage = s.SecureErrorLogMessage
+	ctx.Response.Header.secureErrorLogMessage = s.SecureErrorLogMessage
+	ctx.Request.secureErrorLogMessage = s.SecureErrorLogMessage
+	ctx.Response.secureErrorLogMessage = s.SecureErrorLogMessage
 
-		connectionClose bool
+	if s.DisableHeaderNamesNormalizing {
+		ctx.Request.Header.DisableNormalizing()
+		ctx.Response.Header.DisableNormalizing()
+	}
 
-		continueReadingRequest = true
-	)
-	for {
-		connRequestNum++
-
-		// If this is a keep-alive connection set the idle timeout.
-		if connRequestNum > 1 {
-			if d := s.idleTimeout(); d > 0 {
-				if err := conn.SetReadDeadline(time.Now().Add(d)); err != nil {
-					break
+	// 1. async read header
+	ctx.chain.then(func() error {
+		err := ctx.Request.Header.tryRead(ctx.br, ctx.br.Buffered()+conn.InboundBuffered())
+		if ctx.Request.Header.ContentLength() > 0 {
+			// 2. async read body
+			// read body
+			ctx.chain.then(func() error {
+				var err error
+				maxRequestBodySize := s.MaxRequestBodySize
+				if maxRequestBodySize <= 0 {
+					maxRequestBodySize = DefaultMaxRequestBodySize
 				}
-			}
-		}
-
-		if !s.ReduceMemoryUsage || br != nil {
-			if br == nil {
-				br = acquireReader(ctx)
-			}
-
-			// If this is a keep-alive connection we want to try and read the first bytes
-			// within the idle time.
-			if connRequestNum > 1 {
-				var b []byte
-				b, err = br.Peek(1)
-				if len(b) == 0 {
-					// If reading from a keep-alive connection returns nothing it means
-					// the connection was closed (either timeout or from the other side).
-					if err != io.EOF {
-						err = ErrNothingRead{err}
-					}
-				}
-			}
-		} else {
-			// If this is a keep-alive connection acquireByteReader will try to peek
-			// a couple of bytes already so the idle timeout will already be used.
-			br, err = acquireByteReader(&ctx)
-		}
-
-		//ctx.Request.isTLS = isTLS
-		ctx.Response.Header.noDefaultContentType = s.NoDefaultContentType
-		ctx.Response.Header.noDefaultDate = s.NoDefaultDate
-
-		// Secure header error logs configuration
-		ctx.Request.Header.secureErrorLogMessage = s.SecureErrorLogMessage
-		ctx.Response.Header.secureErrorLogMessage = s.SecureErrorLogMessage
-		ctx.Request.secureErrorLogMessage = s.SecureErrorLogMessage
-		ctx.Response.secureErrorLogMessage = s.SecureErrorLogMessage
-
-		if err == nil {
-			//s.setState(conn, StateActive)
-
-			if s.ReadTimeout > 0 {
-				if err := conn.SetReadDeadline(time.Now().Add(s.ReadTimeout)); err != nil {
-					break
-				}
-			} else if s.IdleTimeout > 0 && connRequestNum > 1 {
-				// If this was an idle connection and the server has an IdleTimeout but
-				// no ReadTimeout then we should remove the ReadTimeout.
-				if err := conn.SetReadDeadline(zeroTime); err != nil {
-					break
-				}
-			}
-			if s.DisableHeaderNamesNormalizing {
-				ctx.Request.Header.DisableNormalizing()
-				ctx.Response.Header.DisableNormalizing()
-			}
-
-			// Reading Headers.
-			//
-			// If we have pipeline response in the outgoing buffer,
-			// we only want to try and read the next headers once.
-			// If we have to wait for the next request we flush the
-			// outgoing buffer first so it doesn't have to wait.
-			if bw != nil && bw.Buffered() > 0 {
-				err = ctx.Request.Header.readLoop(br, false)
-				if err == errNeedMore {
-					err = bw.Flush()
-					if err != nil {
-						break
-					}
-
-					err = ctx.Request.Header.Read(br)
-				}
-			} else {
-				err = ctx.Request.Header.Read(br)
-			}
-
-			if err == nil {
-				if onHdrRecv := s.HeaderReceived; onHdrRecv != nil {
-					reqConf := onHdrRecv(&ctx.Request.Header)
-					if reqConf.ReadTimeout > 0 {
-						deadline := time.Now().Add(reqConf.ReadTimeout)
-						if err := conn.SetReadDeadline(deadline); err != nil {
-							panic(fmt.Sprintf("BUG: error in SetReadDeadline(%v): %v", deadline, err))
-						}
-					}
-					switch {
-					case reqConf.MaxRequestBodySize > 0:
-						maxRequestBodySize = reqConf.MaxRequestBodySize
-					case s.MaxRequestBodySize > 0:
-						maxRequestBodySize = s.MaxRequestBodySize
-					default:
-						maxRequestBodySize = DefaultMaxRequestBodySize
-					}
-					if reqConf.WriteTimeout > 0 {
-						writeTimeout = reqConf.WriteTimeout
-					} else {
-						writeTimeout = s.WriteTimeout
-					}
-				}
-				// read body
 				if s.StreamRequestBody {
-					err = ctx.Request.readBodyStream(br, maxRequestBodySize, s.GetOnly, !s.DisablePreParseMultipartForm)
+					err = ctx.Request.readBodyStream(ctx.br, maxRequestBodySize, s.GetOnly, !s.DisablePreParseMultipartForm)
 				} else {
-					err = ctx.Request.readLimitBody(br, maxRequestBodySize, s.GetOnly, !s.DisablePreParseMultipartForm)
+					err = ctx.Request.readLimitBody(ctx.br, maxRequestBodySize, s.GetOnly, !s.DisablePreParseMultipartForm)
 				}
-			}
-
-			if (s.ReduceMemoryUsage && br.Buffered() == 0) || err != nil {
-				releaseReader(s, br)
-				br = nil
-			}
+				return err
+			})
 		}
-
+		return err
+	}).onComplete(func(err error) error {
 		if err != nil {
-			if err == io.EOF {
-				err = nil
-			} else if nr, ok := err.(ErrNothingRead); ok {
-				if connRequestNum > 1 {
-					// This is not the first request and we haven't read a single byte
-					// of a new request yet. This means it's just a keep-alive connection
-					// closing down either because the remote closed it or because
-					// or a read timeout on our side. Either way just close the connection
-					// and don't return any error response.
-					err = nil
-				} else {
-					err = nr.error
-				}
-			}
-
-			if err != nil {
-				bw = s.writeErrorResponse(bw, ctx, serverName, err)
-			}
-			break
+			return err
 		}
-
-		// 'Expect: 100-continue' request handling.
-		// See https://www.w3.org/Protocols/rfc2616/rfc2616-sec8.html#sec8.2.3 for details.
-		if ctx.Request.MayContinue() {
-			// Allow the ability to deny reading the incoming request body
-			if s.ContinueHandler != nil {
-				if continueReadingRequest = s.ContinueHandler(&ctx.Request.Header); !continueReadingRequest {
-					if br != nil {
-						br.Reset(ctx.c)
-					}
-
-					ctx.SetStatusCode(StatusExpectationFailed)
-				}
-			}
-
-			if continueReadingRequest {
-				if bw == nil {
-					bw = acquireWriter(ctx)
-				}
-
-				// Send 'HTTP/1.1 100 Continue' response.
-				_, err = bw.Write(strResponseContinue)
-				if err != nil {
-					break
-				}
-				err = bw.Flush()
-				if err != nil {
-					break
-				}
-				if s.ReduceMemoryUsage {
-					releaseWriter(s, bw)
-					bw = nil
-				}
-
-				// Read request body.
-				if br == nil {
-					br = acquireReader(ctx)
-				}
-
-				if s.StreamRequestBody {
-					err = ctx.Request.ContinueReadBodyStream(br, maxRequestBodySize, !s.DisablePreParseMultipartForm)
-				} else {
-					err = ctx.Request.ContinueReadBody(br, maxRequestBodySize, !s.DisablePreParseMultipartForm)
-				}
-				if (s.ReduceMemoryUsage && br.Buffered() == 0) || err != nil {
-					releaseReader(s, br)
-					br = nil
-				}
-				if err != nil {
-					bw = s.writeErrorResponse(bw, ctx, serverName, err)
-					break
-				}
-			}
-		}
-
 		// store req.ConnectionClose so even if it was changed inside of handler
-		connectionClose = s.DisableKeepalive || ctx.Request.Header.ConnectionClose()
+		connectionClose := s.DisableKeepalive || ctx.Request.Header.ConnectionClose()
+		serverName := s.getServerName()
 
 		if serverName != "" {
 			ctx.Response.Header.SetServer(serverName)
 		}
-		ctx.connID = connID
-		ctx.connRequestNum = connRequestNum
-		ctx.time = time.Now()
+		connRequestNum := ctx.connRequestNum
+		ctx.connRequestNum++
+		bw := ctx.bw
+		br := ctx.br
 
-		// If a client denies a request the handler should not be called
-		if continueReadingRequest {
-			s.Handler(ctx)
-		}
+		s.Handler(ctx)
 
-		timeoutResponse = ctx.timeoutResponse
+		timeoutResponse := ctx.timeoutResponse
 		if timeoutResponse != nil {
 			// Acquire a new ctx because the old one will still be in use by the timeout out handler.
 			ctx = s.acquireCtx(conn)
@@ -1814,23 +1678,10 @@ func (s *Server) Serve(c context.Context, conn network.Conn) (err error) {
 			ctx.Response.SkipBody = true
 		}
 
-		hijackHandler = ctx.hijackHandler
+		hijackHandler := ctx.hijackHandler
 		ctx.hijackHandler = nil
-		hijackNoResponse = ctx.hijackNoResponse && hijackHandler != nil
+		hijackNoResponse := ctx.hijackNoResponse && hijackHandler != nil
 		ctx.hijackNoResponse = false
-
-		if writeTimeout > 0 {
-			if err := conn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
-				panic(fmt.Sprintf("BUG: error in SetWriteDeadline(%v): %v", writeTimeout, err))
-			}
-			previousWriteTimeout = writeTimeout
-		} else if previousWriteTimeout > 0 {
-			// We don't want a write timeout but we previously set one, remove it.
-			if err := conn.SetWriteDeadline(zeroTime); err != nil {
-				panic(fmt.Sprintf("BUG: error in SetWriteDeadline(zeroTime): %v", err))
-			}
-			previousWriteTimeout = 0
-		}
 
 		connectionClose = connectionClose ||
 			(s.MaxRequestsPerConn > 0 && connRequestNum >= uint64(s.MaxRequestsPerConn)) ||
@@ -1850,11 +1701,9 @@ func (s *Server) Serve(c context.Context, conn network.Conn) (err error) {
 		}
 
 		if !hijackNoResponse {
-			if bw == nil {
-				bw = acquireWriter(ctx)
-			}
 			if err = writeResponse(ctx, bw); err != nil {
-				break
+				//break
+				return err
 			}
 
 			// Only flush the writer if we don't have another request in the pipeline.
@@ -1865,70 +1714,39 @@ func (s *Server) Serve(c context.Context, conn network.Conn) (err error) {
 			if br == nil || br.Buffered() == 0 || connectionClose || (s.ReduceMemoryUsage && hijackHandler == nil) {
 				err = bw.Flush()
 				if err != nil {
-					break
+					//break
+					return err
 				}
 			}
 			if connectionClose {
-				break
+				//break
+				return err
 			}
 			if s.ReduceMemoryUsage && hijackHandler == nil {
 				releaseWriter(s, bw)
 				bw = nil
 			}
+
+			// TODO hijack
+
+			ctx.userValues.Reset()
+			ctx.Request.Reset()
+			ctx.Response.Reset()
+			conn.SetContext(nil)
+			ctx.Release()
 		}
 
-		if hijackHandler != nil {
-			var hjr io.Reader = conn
-			if br != nil {
-				hjr = br
-				br = nil
-			}
-			if bw != nil {
-				err = bw.Flush()
-				if err != nil {
-					break
-				}
-				releaseWriter(s, bw)
-				bw = nil
-			}
-			err = conn.SetDeadline(zeroTime)
-			if err != nil {
-				break
-			}
-			go hijackConnHandler(ctx, hjr, conn, s, hijackHandler)
-			err = errHijacked
-			break
-		}
+		return err
+	})
 
-		if ctx.Request.bodyStream != nil {
-			if rs, ok := ctx.Request.bodyStream.(*requestStream); ok {
-				releaseRequestStream(rs)
-			}
-			ctx.Request.bodyStream = nil
-		}
+	conn.SetContext(ctx)
 
-		//s.setState(conn, StateIdle)
-		ctx.userValues.Reset()
-		ctx.Request.Reset()
-		ctx.Response.Reset()
+	return ctx
+}
 
-		if atomic.LoadInt32(&s.stop) == 1 {
-			err = nil
-			break
-		}
-	}
-
-	if br != nil {
-		releaseReader(s, br)
-	}
-	if bw != nil {
-		releaseWriter(s, bw)
-	}
-	if hijackHandler == nil {
-		s.releaseCtx(ctx)
-	}
-
-	return
+func (s *Server) Serve(c context.Context, conn network.Conn) (err error) {
+	ctx := s.GetRequestCtx(conn)
+	return ctx.chain.exec()
 }
 
 func (s *Server) setState(nc net.Conn, state ConnState) {

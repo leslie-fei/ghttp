@@ -9,6 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/leslie-fei/webapp/pkg/errs"
 )
 
 type timeoutError struct{}
@@ -2242,7 +2244,8 @@ func headerErrorMsg(typ string, err error, b []byte, secureErrorLogMessage bool)
 //
 // io.EOF is returned if r is closed before reading the first header byte.
 func (h *RequestHeader) Read(r *bufio.Reader) error {
-	return h.readLoop(r, true)
+	return h.tryRead(r, 1)
+	//return h.readLoop(r, true)
 }
 
 // readLoop reads request header from r optionally loops until it has enough data.
@@ -2319,7 +2322,7 @@ func (h *RequestHeader) tryReadTrailer(r *bufio.Reader, n int) error {
 }
 
 func (h *RequestHeader) tryRead(r *bufio.Reader, n int) error {
-	h.resetSkipNormalize()
+	//h.resetSkipNormalize()
 	b, err := r.Peek(n)
 	if len(b) == 0 {
 		if err == io.EOF {
@@ -3535,7 +3538,8 @@ func appendArgsKeyBytes(dst []byte, args []argsKV, sep []byte) []byte {
 }
 
 var (
-	errNeedMore    = errors.New("need more data: cannot find trailing lf")
+	//errNeedMore    = errors.New("need more data: cannot find trailing lf")
+	errNeedMore    = errs.ErrNeedMore
 	errInvalidName = errors.New("invalid header name")
 	errSmallBuffer = errors.New("small read buffer. Increase ReadBufferSize")
 )
