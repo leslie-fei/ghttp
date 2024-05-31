@@ -11,15 +11,18 @@ import (
 	"github.com/panjf2000/gnet/v2/pkg/logging"
 )
 
-func NewTransporter(addr string, multicore bool) network.Transporter {
-	return &transporter{addr: addr, multicore: multicore}
+func NewTransporter(addr string, opts ...gnet.Option) network.Transporter {
+	t := &transporter{addr: addr, opts: opts}
+	return t
 }
 
+type Option func(t *transporter)
+
 type transporter struct {
-	addr      string
-	multicore bool
-	engine    gnet.Engine
-	handler   *handler
+	addr    string
+	opts    []gnet.Option
+	engine  gnet.Engine
+	handler *handler
 }
 
 func (t *transporter) Shutdown(ctx context.Context) error {
@@ -38,7 +41,7 @@ func (t *transporter) ListenAndServe(onData network.OnData) error {
 		onData: onData,
 	}
 	t.handler = h
-	return gnet.Run(h, t.addr, gnet.WithMulticore(t.multicore))
+	return gnet.Run(h, t.addr, t.opts...)
 }
 
 type handler struct {

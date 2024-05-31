@@ -6,12 +6,13 @@ import (
 	"github.com/leslie-fei/ghttp/pkg/network"
 	"github.com/leslie-fei/ghttp/pkg/network/gnet"
 	"github.com/leslie-fei/ghttp/pkg/protocol"
+	gnet2 "github.com/panjf2000/gnet/v2"
 )
 
 var hello = []byte("HelloWorld!")
 
 func main() {
-	ts := gnet.NewTransporter("tcp://:8092", true)
+	ts := gnet.NewTransporter("tcp://:8092", gnet2.WithNumEventLoop(3))
 
 	srv := &protocol.Server{
 		Handler: func(ctx *protocol.RequestCtx) {
