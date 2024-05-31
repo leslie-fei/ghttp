@@ -1,4 +1,4 @@
-module github.com/leslie-fei/webapp
+module github.com/leslie-fei/ghttp
 
 go 1.21
 

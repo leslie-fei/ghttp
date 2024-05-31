@@ -4,9 +4,9 @@ import (
 	"context"
 	_ "net/http/pprof"
 
-	"github.com/leslie-fei/webapp/pkg/network"
-	"github.com/leslie-fei/webapp/pkg/network/gnet"
-	"github.com/leslie-fei/webapp/pkg/protocol"
+	"github.com/leslie-fei/ghttp/pkg/network"
+	"github.com/leslie-fei/ghttp/pkg/network/gnet"
+	"github.com/leslie-fei/ghttp/pkg/protocol"
 )
 
 var hello = []byte("HelloWorld!")

@@ -5,8 +5,8 @@ import (
 	"errors"
 	"time"
 
-	"github.com/leslie-fei/webapp/pkg/errs"
-	"github.com/leslie-fei/webapp/pkg/network"
+	"github.com/leslie-fei/ghttp/pkg/errs"
+	"github.com/leslie-fei/ghttp/pkg/network"
 	"github.com/panjf2000/gnet/v2"
 	"github.com/panjf2000/gnet/v2/pkg/logging"
 )

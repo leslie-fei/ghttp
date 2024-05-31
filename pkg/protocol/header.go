@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/leslie-fei/webapp/pkg/errs"
+	"github.com/leslie-fei/ghttp/pkg/errs"
 )
 
 type timeoutError struct{}

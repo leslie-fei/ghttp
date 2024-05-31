@@ -15,7 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/leslie-fei/webapp/pkg/network"
+	"github.com/leslie-fei/ghttp/pkg/network"
 )
 
 var errNoCertOrKeyProvided = errors.New("cert or key has not provided")
