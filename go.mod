@@ -1,6 +1,8 @@
 module github.com/leslie-fei/ghttp
 
-go 1.21
+go 1.21.0
+
+toolchain go1.22.1
 
 require (
 	github.com/panjf2000/gnet/v2 v2.5.1
@@ -8,6 +10,8 @@ require (
 )
 
 require (
+	github.com/libp2p/go-reuseport v0.4.0 // indirect
+	github.com/urpc/uio v0.0.0-20240531032711-6c800733245b // indirect
 	go.uber.org/atomic v1.7.0 // indirect
 	go.uber.org/multierr v1.6.0 // indirect
 	go.uber.org/zap v1.21.0 // indirect

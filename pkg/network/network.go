@@ -1,5 +1,13 @@
 package network
 
-import "github.com/panjf2000/gnet/v2"
+import (
+	"net"
+)
 
-type Conn = gnet.Conn
+type Conn interface {
+	net.Conn
+	SetContext(ctx any)
+	Context() any
+	InboundBuffered() int
+	RemoteAddr() net.Addr
+}

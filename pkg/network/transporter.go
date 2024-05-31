@@ -14,4 +14,4 @@ type Transporter interface {
 }
 
 // Callback when data is ready on the connection
-type OnData func(ctx context.Context, conn interface{}) error
+type OnData func(ctx context.Context, conn Conn) error

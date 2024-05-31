@@ -3,7 +3,6 @@ package gnet
 import (
 	"context"
 	"errors"
-	"time"
 
 	"github.com/leslie-fei/ghttp/pkg/errs"
 	"github.com/leslie-fei/ghttp/pkg/network"
@@ -74,7 +73,7 @@ func (h *handler) OnClose(c gnet.Conn, _ error) (action gnet.Action) {
 
 func (h *handler) OnTraffic(c gnet.Conn) (action gnet.Action) {
 	for c.InboundBuffered() > 0 {
-		if err := h.onData(context.Background(), &conn{c}); err != nil {
+		if err := h.onData(context.Background(), c); err != nil {
 			if errors.Is(err, errs.ErrNeedMore) {
 				return gnet.None
 			}
@@ -83,51 +82,4 @@ func (h *handler) OnTraffic(c gnet.Conn) (action gnet.Action) {
 		}
 	}
 	return gnet.None
-}
-
-type conn struct {
-	gnet.Conn
-}
-
-func (c *conn) Skip(n int) error {
-	_, err := c.Conn.Discard(n)
-	return err
-}
-
-func (c *conn) Release() error {
-	return nil
-}
-
-func (c *conn) Len() int {
-	return c.Conn.InboundBuffered()
-}
-
-func (c *conn) ReadByte() (byte, error) {
-	b, err := c.Next(1)
-	if err != nil {
-		return 0, err
-	}
-	return b[0], nil
-}
-
-func (c *conn) ReadBinary(n int) (p []byte, err error) {
-	return c.Next(n)
-}
-
-func (c *conn) Malloc(n int) (buf []byte, err error) {
-	//TODO implement me
-	panic("implement me")
-}
-
-func (c *conn) WriteBinary(b []byte) (n int, err error) {
-	return c.Conn.Write(b)
-}
-
-func (c *conn) SetReadTimeout(t time.Duration) error {
-	panic("implement me")
-}
-
-func (c *conn) SetWriteTimeout(t time.Duration) error {
-	//TODO implement me
-	panic("implement me")
 }

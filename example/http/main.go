@@ -2,17 +2,18 @@ package main
 
 import (
 	"context"
+	"runtime"
 
 	"github.com/leslie-fei/ghttp/pkg/network"
-	"github.com/leslie-fei/ghttp/pkg/network/gnet"
+	"github.com/leslie-fei/ghttp/pkg/network/uio"
 	"github.com/leslie-fei/ghttp/pkg/protocol"
-	gnet2 "github.com/panjf2000/gnet/v2"
 )
 
 var hello = []byte("HelloWorld!")
 
 func main() {
-	ts := gnet.NewTransporter("tcp://:8092", gnet2.WithNumEventLoop(3))
+	//ts := gnet.NewTransporter("tcp://:8092", gnet2.WithNumEventLoop(3))
+	ts := uio.NewTransporter("tcp://:8091", runtime.NumCPU())
 
 	srv := &protocol.Server{
 		Handler: func(ctx *protocol.RequestCtx) {
@@ -32,9 +33,8 @@ func main() {
 		conn.Write([]byte("\nHeader2: Value2\r\n\r\n"))
 	}()*/
 
-	err := ts.ListenAndServe(func(ctx context.Context, conn interface{}) error {
-		c := conn.(network.Conn)
-		return srv.Serve(ctx, c)
+	err := ts.ListenAndServe(func(ctx context.Context, conn network.Conn) error {
+		return srv.Serve(ctx, conn)
 	})
 
 	if err != nil {
