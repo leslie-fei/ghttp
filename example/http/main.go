@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	_ "net/http/pprof"
 
 	"github.com/leslie-fei/ghttp/pkg/network"
 	"github.com/leslie-fei/ghttp/pkg/network/gnet"
@@ -14,16 +13,13 @@ var hello = []byte("HelloWorld!")
 func main() {
 	ts := gnet.NewTransporter("tcp://:8092", true)
 
-	/*	go func() {
-		if err := http.ListenAndServe(":6060", nil); err != nil {
-			panic(err)
-		}
-	}()*/
-
 	srv := &protocol.Server{
 		Handler: func(ctx *protocol.RequestCtx) {
 			_, _ = ctx.Write(hello)
 		},
+		//Executor: func(fn func()) {
+		//	go fn()
+		//},
 	}
 
 	/*go func() {

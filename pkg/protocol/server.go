@@ -55,6 +55,8 @@ type Server struct {
 	// Instead the user should use `recover` to handle these situations.
 	Handler RequestHandler
 
+	Executor func(fn func())
+
 	// ErrorHandler for returning a response in case of an error while receiving or parsing the request.
 	//
 	// The following is a non-exhaustive list of errors that can be expected as argument:
@@ -1665,75 +1667,86 @@ func (s *Server) GetRequestCtx(conn network.Conn) *RequestCtx {
 		bw := ctx.bw
 		br := ctx.br
 
-		s.Handler(ctx)
+		var handler = func() {
+			s.Handler(ctx)
 
-		timeoutResponse := ctx.timeoutResponse
-		if timeoutResponse != nil {
-			// Acquire a new ctx because the old one will still be in use by the timeout out handler.
-			ctx = s.acquireCtx(conn)
-			timeoutResponse.CopyTo(&ctx.Response)
-		}
-
-		if ctx.IsHead() {
-			ctx.Response.SkipBody = true
-		}
-
-		hijackHandler := ctx.hijackHandler
-		ctx.hijackHandler = nil
-		hijackNoResponse := ctx.hijackNoResponse && hijackHandler != nil
-		ctx.hijackNoResponse = false
-
-		connectionClose = connectionClose ||
-			(s.MaxRequestsPerConn > 0 && connRequestNum >= uint64(s.MaxRequestsPerConn)) ||
-			ctx.Response.Header.ConnectionClose() ||
-			(s.CloseOnShutdown && atomic.LoadInt32(&s.stop) == 1)
-		if connectionClose {
-			ctx.Response.Header.SetConnectionClose()
-		} else if !ctx.Request.Header.IsHTTP11() {
-			// Set 'Connection: keep-alive' response header for HTTP/1.0 request.
-			// There is no need in setting this header for http/1.1, since in http/1.1
-			// connections are keep-alive by default.
-			ctx.Response.Header.setNonSpecial(strConnection, strKeepAlive)
-		}
-
-		if serverName != "" && len(ctx.Response.Header.Server()) == 0 {
-			ctx.Response.Header.SetServer(serverName)
-		}
-
-		if !hijackNoResponse {
-			if err = writeResponse(ctx, bw); err != nil {
-				//break
-				return err
+			timeoutResponse := ctx.timeoutResponse
+			if timeoutResponse != nil {
+				// Acquire a new ctx because the old one will still be in use by the timeout out handler.
+				ctx = s.acquireCtx(conn)
+				timeoutResponse.CopyTo(&ctx.Response)
 			}
 
-			// Only flush the writer if we don't have another request in the pipeline.
-			// This is a big of an ugly optimization for https://www.techempower.com/benchmarks/
-			// This benchmark will send 16 pipelined requests. It is faster to pack as many responses
-			// in a TCP packet and send it back at once than waiting for a flush every request.
-			// In real world circumstances this behaviour could be argued as being wrong.
-			if br == nil || br.Buffered() == 0 || connectionClose || (s.ReduceMemoryUsage && hijackHandler == nil) {
-				err = bw.Flush()
-				if err != nil {
-					//break
-					return err
-				}
+			if ctx.IsHead() {
+				ctx.Response.SkipBody = true
 			}
+
+			hijackHandler := ctx.hijackHandler
+			ctx.hijackHandler = nil
+			hijackNoResponse := ctx.hijackNoResponse && hijackHandler != nil
+			ctx.hijackNoResponse = false
+
+			connectionClose = connectionClose ||
+				(s.MaxRequestsPerConn > 0 && connRequestNum >= uint64(s.MaxRequestsPerConn)) ||
+				ctx.Response.Header.ConnectionClose() ||
+				(s.CloseOnShutdown && atomic.LoadInt32(&s.stop) == 1)
 			if connectionClose {
-				//break
-				return err
-			}
-			if s.ReduceMemoryUsage && hijackHandler == nil {
-				releaseWriter(s, bw)
-				bw = nil
+				ctx.Response.Header.SetConnectionClose()
+			} else if !ctx.Request.Header.IsHTTP11() {
+				// Set 'Connection: keep-alive' response header for HTTP/1.0 request.
+				// There is no need in setting this header for http/1.1, since in http/1.1
+				// connections are keep-alive by default.
+				ctx.Response.Header.setNonSpecial(strConnection, strKeepAlive)
 			}
 
-			// TODO hijack
+			if serverName != "" && len(ctx.Response.Header.Server()) == 0 {
+				ctx.Response.Header.SetServer(serverName)
+			}
 
-			ctx.userValues.Reset()
-			ctx.Request.Reset()
-			ctx.Response.Reset()
-			conn.SetContext(nil)
-			ctx.Release()
+			if !hijackNoResponse {
+				if err = writeResponse(ctx, bw); err != nil {
+					//break
+					//return err
+					return
+				}
+
+				// Only flush the writer if we don't have another request in the pipeline.
+				// This is a big of an ugly optimization for https://www.techempower.com/benchmarks/
+				// This benchmark will send 16 pipelined requests. It is faster to pack as many responses
+				// in a TCP packet and send it back at once than waiting for a flush every request.
+				// In real world circumstances this behaviour could be argued as being wrong.
+				if br == nil || br.Buffered() == 0 || connectionClose || (s.ReduceMemoryUsage && hijackHandler == nil) {
+					err = bw.Flush()
+					if err != nil {
+						//break
+						//return err
+						return
+					}
+				}
+				if connectionClose {
+					//break
+					//return err
+					return
+				}
+				if s.ReduceMemoryUsage && hijackHandler == nil {
+					releaseWriter(s, bw)
+					bw = nil
+				}
+
+				// TODO hijack
+
+				ctx.userValues.Reset()
+				ctx.Request.Reset()
+				ctx.Response.Reset()
+				conn.SetContext(nil)
+				ctx.Release()
+			}
+		}
+
+		if s.Executor != nil {
+			s.Executor(handler)
+		} else {
+			handler()
 		}
 
 		return err
