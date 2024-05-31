@@ -1704,6 +1704,7 @@ func (s *Server) GetRequestCtx(conn network.Conn) *RequestCtx {
 			}
 
 			if !hijackNoResponse {
+				conn.SetContext(nil)
 				if err = writeResponse(ctx, bw); err != nil {
 					//break
 					//return err
@@ -1738,7 +1739,6 @@ func (s *Server) GetRequestCtx(conn network.Conn) *RequestCtx {
 				ctx.userValues.Reset()
 				ctx.Request.Reset()
 				ctx.Response.Reset()
-				conn.SetContext(nil)
 				ctx.Release()
 			}
 		}
